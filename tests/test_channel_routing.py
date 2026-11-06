@@ -76,7 +76,7 @@ def _observed_still_dry() -> list[tuple[str, float]]:
     return _hourly((0.0, 0.0, 0.0, 0.0))
 
 
-def _constant_lag() -> VariableLag:
+def _three_hour_lag() -> VariableLag:
     return VariableLag(tau_ref_hours=3.0, q_ref_m3s=100.0, beta=0.0)
 
 
@@ -250,7 +250,7 @@ def test_station_and_forecast_splices_observed_lag_and_remainder_rain() -> None:
         rainfall,
         loss,
         watershed,
-        _constant_lag(),
+        _three_hour_lag(),
         as_of=_AS_OF,
         timestep_hours=1.0,
         observed_inflow=_observed_still_dry(),
@@ -260,7 +260,7 @@ def test_station_and_forecast_splices_observed_lag_and_remainder_rain() -> None:
         _forecast_rain(tail=40.0),
         loss,
         watershed,
-        _constant_lag(),
+        _three_hour_lag(),
         as_of=_AS_OF,
         timestep_hours=1.0,
         observed_inflow=_observed_still_dry(),
@@ -270,7 +270,7 @@ def test_station_and_forecast_splices_observed_lag_and_remainder_rain() -> None:
         _forecast_rain(early=50.0),
         loss,
         watershed,
-        _constant_lag(),
+        _three_hour_lag(),
         as_of=_AS_OF,
         timestep_hours=1.0,
         observed_inflow=_observed_still_dry(),
@@ -287,6 +287,8 @@ def test_station_and_forecast_splices_observed_lag_and_remainder_rain() -> None:
     assert blended.as_of == _AS_OF
     assert blended.t_join == _T_JOIN
     assert blended.join_discharge_m3s == 120.0
+    assert blended.routed_peak_discharge_m3s == 120.0
+    assert blended.routed_peak_time == _T_JOIN
     assert blended.hydrograph.points[0].time == "2020-06-30T15:00:00Z"
     assert blended.hydrograph.points[-1].time is not None
     assert blended.hydrograph.points[-1].time >= "2020-07-01T15:00:00Z"
@@ -331,7 +333,7 @@ def test_remainder_after_join_keeps_initial_abstraction_from_the_full_storm() ->
         _rain({2: 40.0, 9: 15.0}),
         loss,
         watershed,
-        _constant_lag(),
+        _three_hour_lag(),
         as_of=_AS_OF,
         timestep_hours=1.0,
         observed_inflow=observed,
@@ -341,7 +343,7 @@ def test_remainder_after_join_keeps_initial_abstraction_from_the_full_storm() ->
         _rain({2: 0.0, 9: 15.0}),
         loss,
         watershed,
-        _constant_lag(),
+        _three_hour_lag(),
         as_of=_AS_OF,
         timestep_hours=1.0,
         observed_inflow=observed,
@@ -351,7 +353,10 @@ def test_remainder_after_join_keeps_initial_abstraction_from_the_full_storm() ->
     assert wet_before_join.hydrograph.discharge_at(_AS_OF) == 0.0
     wet_at_join = wet_before_join.hydrograph.discharge_at(_T_JOIN)
     dry_at_join = dry_before_join.hydrograph.discharge_at(_T_JOIN)
-    assert wet_at_join == dry_at_join
+    assert wet_at_join == dry_at_join == 120.0
+    assert wet_before_join.hydrograph.discharge_at("2020-07-01T07:00:00Z") == 120.0
+    assert wet_before_join.hydrograph.discharge_at("2020-07-01T08:00:00Z") == 120.0
+    assert wet_before_join.hydrograph.discharge_at("2020-07-01T15:00:00Z") == 0.0
     assert wet_before_join.hydrograph.discharge_at(probe) > dry_before_join.hydrograph.discharge_at(
         probe
     )
@@ -364,7 +369,7 @@ def test_station_and_forecast_rejects_a_hyetograph_that_ends_at_as_of() -> None:
             _rain({1: 10.0, 2: 10.0, 3: 10.0}),
             ScsCnParameters(cn_ii=80),
             Watershed(area_km2=20, lag_hours=1.0),
-            _constant_lag(),
+            _three_hour_lag(),
             as_of=_AS_OF,
             timestep_hours=1.0,
             observed_inflow=_observed_still_dry(),
@@ -373,6 +378,20 @@ def test_station_and_forecast_rejects_a_hyetograph_that_ends_at_as_of() -> None:
     assert error.value.code is ChannelRoutingErrorCode.MISSING_FUTURE_RAINFALL
     assert "as_of" in error.value.message
     assert "rainfall" in error.value.message
+
+
+def test_muskingum_uses_the_nearest_stable_subreach_count() -> None:
+    routed = route_muskingum(
+        _hourly((0.0, 10.0, 0.0, 0.0, 0.0, 0.0)),
+        MuskingumReach(k_hours=5.1, x=0.49),
+        timestep_hours=1.0,
+    )
+
+    assert routed.coefficients.n_subreaches == 5
+    assert routed.coefficients.c0 >= 0.0
+    assert routed.coefficients.c2 >= 0.0
+    coefficient_sum = routed.coefficients.c0 + routed.coefficients.c1 + routed.coefficients.c2
+    assert coefficient_sum == pytest.approx(1.0)
 
 
 def test_muskingum_rejects_illegal_weighting_storage_and_an_unstable_timestep() -> None:

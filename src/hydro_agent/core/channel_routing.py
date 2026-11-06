@@ -368,10 +368,11 @@ class MuskingumResult:
 
 
 def _subreach_count(k_hours: float, x: float, timestep_hours: float) -> int:
-    """HEC-HMS split: N = ceil(K / Δt) when Δt < 2 K x, else 1 if that is stable.
+    """HEC-HMS split: N = ceil(K / Δt) when Δt < 2 K x and that N is stable.
 
-    N must also satisfy ``2 K_sub x <= Δt <= 2 K_sub (1 - x)``. Splitting cannot
-    repair a timestep that is already longer than ``2 K (1 - x)``.
+    N must satisfy ``2 K_sub x <= Δt <= 2 K_sub (1 - x)``. If the ceiling count
+    falls outside that range, use the nearest integer that does. Splitting
+    cannot repair a timestep that is already longer than ``2 K (1 - x)``.
     """
 
     if x == 0.0:
@@ -494,7 +495,7 @@ def route_muskingum(
 class VariableLag:
     """Kinematic lag τ(Q) = τ_ref * (max(Q, Q_min) / Q_ref) ** (-β).
 
-    ``beta = 0`` is a constant lag. The result is clamped to
+    ``beta = 0`` does not change the lag with discharge. The result is clamped to
     ``[tau_min_hours, tau_max_hours]`` when those bounds are set. A larger
     discharge has a shorter lag when ``beta > 0``.
     """
@@ -727,6 +728,8 @@ class BlendedInflow:
     t_join: str
     area_ratio: float
     join_discharge_m3s: float
+    routed_peak_discharge_m3s: float
+    routed_peak_time: str
 
 
 def _interp(anchors: Sequence[tuple[int, float]], instant: int) -> float:
@@ -825,10 +828,13 @@ def blend_station_and_forecast(
     is the variable-lag routing only. For ``t > t_join`` it is
     ``Q_arr(t_join) + max(0, Q_rem(t) - Q_rem(t_join))``, where ``Q_rem`` is the
     SCS-TUH convolution of excess pulses that end after ``t_join``. Initial
-    abstraction comes from the whole storm. The remainder term is defined on
-    the SCS-TUH support; a scenario-window hour with no ordinate stays 0.
-    Rainfall that ends at or before ``as_of`` is not a forecast: the call fails
-    with ``missing_future_rainfall`` instead of inventing a slope.
+    abstraction comes from the whole storm. Hours after ``t_join`` and before
+    the first remainder ordinate stay at the join discharge, because ``Q_rem``
+    is still 0 there. After the remainder hydrograph ends, a scenario-window
+    hour with no ordinate stays 0. ``t_join`` must fall on the timestep grid
+    so the SCS-TUH splice can see it. Rainfall that ends at or before
+    ``as_of`` is not a forecast: the call fails with
+    ``missing_future_rainfall`` instead of inventing a slope.
     """
 
     if not isinstance(loss, ScsCnParameters):
@@ -873,6 +879,7 @@ def blend_station_and_forecast(
         t_join=routed.t_join,
         observed_inflow=((routed.t_join, q_join),),
     )
+    remainder_times: list[int] = []
     for point in remainder.points:
         if point.time is None:
             continue
@@ -883,6 +890,13 @@ def blend_station_and_forecast(
         if increment < 0.0:
             increment = 0.0
         values[instant] = q_join + increment
+        remainder_times.append(instant)
+    if remainder_times:
+        # Q_rem is 0 until the first convolved ordinate, so the splice holds
+        # the join discharge instead of dropping to an empty-slot 0.
+        first_remainder = min(remainder_times)
+        for instant in _grid(t_join_us + step, first_remainder - step, step):
+            values.setdefault(instant, q_join)
 
     if observed_inflow:
         observed = _parse_series(observed_inflow, "observed_inflow")
@@ -919,4 +933,6 @@ def blend_station_and_forecast(
         t_join=routed.t_join,
         area_ratio=routed.area_ratio,
         join_discharge_m3s=q_join,
+        routed_peak_discharge_m3s=routed.peak_discharge_m3s,
+        routed_peak_time=routed.peak_arrival_time,
     )
