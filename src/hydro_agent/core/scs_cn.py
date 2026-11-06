@@ -245,7 +245,8 @@ class ScsCnResult:
     antecedent-moisture and, when requested, composite-impervious adjustment.
     ``initial_abstraction_mm`` is the threshold Ia = λS, not the depth actually
     consumed. Consumed initial abstraction and infiltration are watershed-average
-    depths, so they close with excess against rainfall.
+    depths, so they close with excess against rainfall. ``runoff_coefficient``
+    is total excess divided by total rainfall, and None when no rain fell.
     """
 
     curve_number: float
@@ -280,6 +281,20 @@ class ScsCnCase:
 
     rainfall: RainfallSeries
     parameters: ScsCnParameters
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedLoss:
+    """Curve number, retention, and initial abstraction used for one storm.
+
+    ``impervious_fraction`` is the HEC-HMS split weight. It is zero when the
+    composite curve number already includes that area.
+    """
+
+    curve_number: float
+    potential_retention_mm: float
+    initial_abstraction_mm: float
+    impervious_fraction: float
 
 
 def _clamp_curve_number(curve_number: float) -> float:
@@ -325,8 +340,8 @@ def _potential_retention_mm(curve_number: float) -> float:
     return retention
 
 
-def _resolve(parameters: ScsCnParameters) -> tuple[float, float, float, float]:
-    """Return the SCS curve number, S, Ia, and the split impervious weight.
+def _resolve(parameters: ScsCnParameters) -> _ResolvedLoss:
+    """Map parameters to the curve number and retention used by the SCS equation.
 
     Composite adjustment is applied after the antecedent-moisture conversion
     and replaces the split weight: the impervious fraction is already inside CN.
@@ -344,58 +359,45 @@ def _resolve(parameters: ScsCnParameters) -> tuple[float, float, float, float]:
         )
         split_fraction = 0.0
     retention = _potential_retention_mm(curve_number)
-    return (
-        curve_number,
-        retention,
-        parameters.lambda_coeff * retention,
-        split_fraction,
+    return _ResolvedLoss(
+        curve_number=curve_number,
+        potential_retention_mm=retention,
+        initial_abstraction_mm=parameters.lambda_coeff * retention,
+        impervious_fraction=split_fraction,
     )
 
 
-def _cumulative_excess(
+def _pervious_excess_and_infiltration(
     rainfall_mm: float,
     initial_abstraction_mm: float,
     retention_mm: float,
-) -> float:
+) -> tuple[float, float]:
+    """Cumulative pervious excess and infiltration at one storm rainfall depth."""
+
     if rainfall_mm <= initial_abstraction_mm:
-        return 0.0
+        return 0.0, 0.0
     if retention_mm == 0.0:
-        return rainfall_mm
+        return rainfall_mm, 0.0
     above = rainfall_mm - initial_abstraction_mm
-    return above * above / (above + retention_mm)
-
-
-def _cumulative_infiltration(
-    rainfall_mm: float,
-    initial_abstraction_mm: float,
-    retention_mm: float,
-) -> float:
-    if rainfall_mm <= initial_abstraction_mm or retention_mm == 0.0:
-        return 0.0
-    above = rainfall_mm - initial_abstraction_mm
-    return retention_mm * above / (above + retention_mm)
+    denominator = above + retention_mm
+    return above * above / denominator, retention_mm * above / denominator
 
 
 def _watershed_totals(
     rainfall_mm: float,
-    initial_abstraction_mm: float,
-    retention_mm: float,
-    impervious_fraction: float,
+    loss: _ResolvedLoss,
 ) -> tuple[float, float, float]:
     """Watershed-average cumulative excess, consumed Ia, and infiltration."""
 
-    pervious = 1.0 - impervious_fraction
-    excess = impervious_fraction * rainfall_mm + pervious * _cumulative_excess(
+    pervious_excess, pervious_infiltration = _pervious_excess_and_infiltration(
         rainfall_mm,
-        initial_abstraction_mm,
-        retention_mm,
+        loss.initial_abstraction_mm,
+        loss.potential_retention_mm,
     )
-    consumed = pervious * min(rainfall_mm, initial_abstraction_mm)
-    infiltration = pervious * _cumulative_infiltration(
-        rainfall_mm,
-        initial_abstraction_mm,
-        retention_mm,
-    )
+    pervious = 1.0 - loss.impervious_fraction
+    excess = loss.impervious_fraction * rainfall_mm + pervious * pervious_excess
+    consumed = pervious * min(rainfall_mm, loss.initial_abstraction_mm)
+    infiltration = pervious * pervious_infiltration
     return excess, consumed, infiltration
 
 
@@ -500,19 +502,14 @@ def compute_excess(rainfall: RainfallSeries, parameters: ScsCnParameters) -> Scs
     """
 
     points = _normalize_rainfall(rainfall)
-    curve_number, retention, abstraction, split = _resolve(parameters)
+    loss = _resolve(parameters)
 
     steps: list[ExcessStep] = []
     cumulative_rainfall = 0.0
     previous_excess = 0.0
     for time, depth in points:
         cumulative_rainfall += depth
-        excess, consumed, infiltration = _watershed_totals(
-            cumulative_rainfall,
-            abstraction,
-            retention,
-            split,
-        )
+        excess, consumed, infiltration = _watershed_totals(cumulative_rainfall, loss)
         incremental = _incremental_excess(excess, previous_excess, depth)
         steps.append(
             ExcessStep(
@@ -533,9 +530,9 @@ def compute_excess(rainfall: RainfallSeries, parameters: ScsCnParameters) -> Scs
     total_rainfall = last.cumulative_rainfall_mm
     total_excess = last.cumulative_excess_mm
     result = ScsCnResult(
-        curve_number=curve_number,
-        potential_retention_mm=retention,
-        initial_abstraction_mm=abstraction,
+        curve_number=loss.curve_number,
+        potential_retention_mm=loss.potential_retention_mm,
+        initial_abstraction_mm=loss.initial_abstraction_mm,
         total_rainfall_mm=total_rainfall,
         total_excess_mm=total_excess,
         initial_abstraction_consumed_mm=last.cumulative_initial_abstraction_mm,
