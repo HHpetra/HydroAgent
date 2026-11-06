@@ -362,6 +362,99 @@ def test_remainder_after_join_keeps_initial_abstraction_from_the_full_storm() ->
     )
 
 
+def test_fractional_lag_interpolates_between_as_of_and_t_join() -> None:
+    # τ(200) = 3 * (200/100)^(-1) = 1.5 h, so t_join is 04:30, not an hourly step.
+    as_of = "2020-07-01T03:00:00Z"
+    t_join = "2020-07-01T04:30:00Z"
+    station = [
+        ("2020-07-01T00:00:00Z", 100.0),
+        ("2020-07-01T01:00:00Z", 50.0),
+        ("2020-07-01T03:00:00Z", 200.0),
+    ]
+    observed = _hourly((0.0, 0.0, 0.0, 0.0))
+    lag = VariableLag(tau_ref_hours=3.0, q_ref_m3s=100.0, beta=1.0)
+    loss = ScsCnParameters(cn_ii=100)
+    watershed = Watershed(area_km2=30, lag_hours=1.0)
+    rainfall = _rain({2: 4.0, 3: 4.0, 4: 8.0, 5: 12.0, 6: 6.0, 7: 6.0})
+    heavier_after_join = _rain({2: 4.0, 3: 4.0, 4: 8.0, 5: 12.0, 6: 40.0, 7: 40.0})
+    blended = blend_station_and_forecast(
+        station,
+        rainfall,
+        loss,
+        watershed,
+        lag,
+        as_of=as_of,
+        timestep_hours=1.0,
+        observed_inflow=observed,
+    )
+    changed = blend_station_and_forecast(
+        station,
+        heavier_after_join,
+        loss,
+        watershed,
+        lag,
+        as_of=as_of,
+        timestep_hours=1.0,
+        observed_inflow=observed,
+    )
+
+    assert blended.t_join == t_join
+    assert blended.join_discharge_m3s == 200.0
+    assert blended.routed_peak_time == t_join
+    assert all(point.time != t_join for point in blended.hydrograph.points)
+    for time, discharge in observed:
+        assert blended.hydrograph.discharge_at(time) == discharge
+    assert blended.hydrograph.discharge_at(as_of) == 0.0
+    # 04:00 is the only hourly instant in (03:00, 04:30]; anchors are 100 at 03:00 and 200 at 04:30.
+    assert blended.hydrograph.discharge_at("2020-07-01T04:00:00Z") == pytest.approx(500.0 / 3.0)
+    assert blended.hydrograph.discharge_at("2020-07-01T05:00:00Z") > 200.0
+    assert changed.hydrograph.discharge_at("2020-07-01T04:00:00Z") == pytest.approx(
+        blended.hydrograph.discharge_at("2020-07-01T04:00:00Z")
+    )
+    assert changed.hydrograph.discharge_at(as_of) == 0.0
+    assert changed.hydrograph.discharge_at("2020-07-01T06:00:00Z") != pytest.approx(
+        blended.hydrograph.discharge_at("2020-07-01T06:00:00Z")
+    )
+
+
+def test_remainder_tail_recedes_to_zero_after_the_unit_hydrograph() -> None:
+    blended = blend_station_and_forecast(
+        _station_flow(),
+        _rain({7: 20.0}),
+        ScsCnParameters(cn_ii=100),
+        Watershed(area_km2=25, lag_hours=1.0),
+        _three_hour_lag(),
+        as_of=_AS_OF,
+        timestep_hours=1.0,
+        observed_inflow=_observed_still_dry(),
+    )
+
+    assert blended.hydrograph.discharge_at(_T_JOIN) == blended.join_discharge_m3s == 120.0
+    assert blended.hydrograph.discharge_at("2020-07-01T08:00:00Z") > 120.0
+    assert blended.hydrograph.discharge_at("2020-07-01T15:00:00Z") == 0.0
+
+
+def test_no_positive_remainder_excess_leaves_later_window_slots_at_zero() -> None:
+    blended = blend_station_and_forecast(
+        _station_flow(),
+        _rain({4: 4.0, 9: 5.0}),
+        ScsCnParameters(cn_ii=75),
+        Watershed(area_km2=20, lag_hours=1.0),
+        _three_hour_lag(),
+        as_of=_AS_OF,
+        timestep_hours=1.0,
+        observed_inflow=_observed_still_dry(),
+    )
+
+    assert blended.hydrograph.discharge_at(_AS_OF) == 0.0
+    assert blended.hydrograph.discharge_at("2020-07-01T04:00:00Z") == 30.0
+    assert blended.hydrograph.discharge_at(_T_JOIN) == 120.0
+    assert blended.hydrograph.discharge_at("2020-07-01T07:00:00Z") == 0.0
+    assert blended.hydrograph.discharge_at("2020-07-01T09:00:00Z") == 0.0
+    assert blended.hydrograph.discharge_at("2020-07-01T12:00:00Z") == 0.0
+    assert blended.hydrograph.discharge_at("2020-07-01T15:00:00Z") == 0.0
+
+
 def test_station_and_forecast_rejects_a_hyetograph_that_ends_at_as_of() -> None:
     with pytest.raises(ChannelRoutingError) as error:
         blend_station_and_forecast(
@@ -392,6 +485,20 @@ def test_muskingum_uses_the_nearest_stable_subreach_count() -> None:
     assert routed.coefficients.c2 >= 0.0
     coefficient_sum = routed.coefficients.c0 + routed.coefficients.c1 + routed.coefficients.c2
     assert coefficient_sum == pytest.approx(1.0)
+
+
+def test_muskingum_near_boundary_does_not_outflow_below_zero() -> None:
+    routed = route_muskingum(
+        _hourly((0.0, 10.0, 4.0, 0.0)),
+        MuskingumReach(k_hours=1.000000001, x=0.5),
+        timestep_hours=1.0,
+    )
+
+    assert routed.coefficients.c0 >= 0.0
+    assert routed.coefficients.c2 >= 0.0
+    coefficient_sum = routed.coefficients.c0 + routed.coefficients.c1 + routed.coefficients.c2
+    assert coefficient_sum == pytest.approx(1.0)
+    assert all(discharge >= 0.0 for discharge in _discharges(routed.hydrograph))
 
 
 def test_muskingum_rejects_illegal_weighting_storage_and_an_unstable_timestep() -> None:

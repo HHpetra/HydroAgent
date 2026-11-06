@@ -57,7 +57,6 @@ class ChannelRoutingErrorCode(StrEnum):
     INVALID_AREA = "invalid_area"
     MISSING_FUTURE_RAINFALL = "missing_future_rainfall"
     STATION_NOT_AT_AS_OF = "station_not_at_as_of"
-    MISALIGNED_JOIN = "misaligned_join"
     INVALID_PARAMETERS = "invalid_parameters"
 
 
@@ -416,6 +415,25 @@ def _coefficients(
     c0 = (half - k_sub_hours * x) / denominator
     c1 = (half + k_sub_hours * x) / denominator
     c2 = (k_sub_hours * (1.0 - x) - half) / denominator
+    return _drop_coefficient_dust(c0, c1, c2)
+
+
+def _drop_coefficient_dust(c0: float, c1: float, c2: float) -> tuple[float, float, float]:
+    """Keep C0 and C2 nonnegative when K sits an ulp outside the stable bound.
+
+    Tolerance on the subreach count can still admit N = 1 for x = 0.5 and a K
+    such as 1.000000001 h with Δt = 1 h. C0 is then about -1e-9 and the first
+    outflow from a zero inflow is negative. Dust no larger than the stability
+    tolerance is set to 0 and C1 takes the residual so the coefficients still
+    sum to 1.
+    """
+
+    if -_STABLE_TOLERANCE <= c0 < 0.0:
+        c0 = 0.0
+    if -_STABLE_TOLERANCE <= c2 < 0.0:
+        c2 = 0.0
+    if c0 >= 0.0 and c2 >= 0.0:
+        c1 = 1.0 - c0 - c2
     return c0, c1, c2
 
 
@@ -443,8 +461,10 @@ def route_muskingum(
 
     The outflow is at the same instants as the inflow. ``O0 = I0``. When
     ``x = 0.5`` and ``Δt = K`` (or each subreach has ``K_sub = Δt``), the wave
-    is translated by ``K`` with no peak attenuation. κ = 1 conserves volume
-    once storage has returned to the initial steady state.
+    is translated by ``K`` with no peak attenuation. A K that is only an ulp
+    above that boundary does not produce a negative coefficient or a negative
+    outflow. κ = 1 conserves volume once storage has returned to the initial
+    steady state.
     """
 
     if not isinstance(reach, MuskingumReach):
@@ -810,6 +830,23 @@ def _anchors_through_join(
     return anchors
 
 
+def _grid_between(origin_us: int, step: int, after_us: int, before_us: int) -> list[int]:
+    """Grid instants strictly after ``after_us`` and strictly before ``before_us``.
+
+    The grid is phased to ``origin_us``. ``after_us`` need not lie on it.
+    """
+
+    if before_us <= after_us:
+        return []
+    offset = (after_us - origin_us) % step
+    instant = after_us + step if offset == 0 else after_us + (step - offset)
+    instants: list[int] = []
+    while instant < before_us:
+        instants.append(instant)
+        instant += step
+    return instants
+
+
 def blend_station_and_forecast(
     station_flow: Sequence[tuple[str, float]],
     rainfall: Sequence[TimedRainfall],
@@ -823,18 +860,26 @@ def blend_station_and_forecast(
 ) -> BlendedInflow:
     """Splice observed inflow, lagged station flow, and remainder-rain runoff.
 
+    ``t_join`` is the physical arrival ``as_of + τ(Q_sta(as_of))``. It is not
+    rounded onto ``timestep_hours``. Grid instants in ``(as_of, t_join]`` are
+    linear interpolations of the lagged station arrivals. Grid instants
+    strictly after ``t_join`` use the remainder splice.
+
     For ``t <= as_of`` the series is the measured dam inflow, including a
-    measured 0 when the flood has not arrived. For ``as_of < t <= t_join`` it
-    is the variable-lag routing only. For ``t > t_join`` it is
-    ``Q_arr(t_join) + max(0, Q_rem(t) - Q_rem(t_join))``, where ``Q_rem`` is the
-    SCS-TUH convolution of excess pulses that end after ``t_join``. Initial
-    abstraction comes from the whole storm. Hours after ``t_join`` and before
-    the first remainder ordinate stay at the join discharge, because ``Q_rem``
-    is still 0 there. After the remainder hydrograph ends, a scenario-window
-    hour with no ordinate stays 0. ``t_join`` must fall on the timestep grid
-    so the SCS-TUH splice can see it. Rainfall that ends at or before
-    ``as_of`` is not a forecast: the call fails with
-    ``missing_future_rainfall`` instead of inventing a slope.
+    measured 0 when the flood has not arrived. For ``t > t_join``,
+    ``I(t) = Q_arr(t_join) + max(0, Q_rem(t) - Q_rem(t_join))``. ``Q_rem`` is
+    the SCS-TUH convolution of excess pulses whose interval end is strictly
+    after ``t_join``; initial abstraction comes from the whole storm. That
+    formula is continuous at ``t_join``. On the remainder-unit-hydrograph
+    support it holds the join discharge as a floor while the added runoff
+    recedes to 0 with the convolution. It does not define a separate recession
+    curve. After that support ends, and when no positive excess falls after
+    ``t_join``, empty slots in ``[as_of - 12 h, as_of + 12 h]`` stay 0 m³/s.
+    Hours after ``t_join`` and before the first positive remainder ordinate
+    stay at the join discharge, because ``Q_rem`` is still 0 there.
+
+    Rainfall that ends at or before ``as_of`` is not a forecast: the call
+    fails with ``missing_future_rainfall`` instead of inventing a slope.
     """
 
     if not isinstance(loss, ScsCnParameters):
@@ -852,11 +897,6 @@ def blend_station_and_forecast(
     t_join_us = _to_us(_parse_rfc3339(routed.t_join, role="t_join"))
     step = _step_us(timestep_hours)
     _require_divides_window(step)
-    if (t_join_us - as_of_us) % step != 0:
-        raise ChannelRoutingError(
-            ChannelRoutingErrorCode.MISALIGNED_JOIN,
-            f"t_join ({routed.t_join}) is not on the {timestep_hours} h grid from as_of",
-        )
     hyetograph = _require_future_rainfall(rainfall, as_of_us, as_of)
 
     station = _parse_series(station_flow, "station_flow")
@@ -865,37 +905,47 @@ def blend_station_and_forecast(
     anchors = _anchors_through_join(routed.arrivals, t_join_us, q_join)
 
     # t <= as_of stays on the measured inflow. The join discharge is written
-    # only when it falls strictly after as_of; a zero lag must not replace it.
+    # only when it falls on a grid instant strictly after as_of.
     values: dict[int, float] = {}
     if t_join_us > as_of_us:
         for instant in _grid(as_of_us + step, t_join_us, step):
             values[instant] = _interp(anchors, instant)
 
+    # as_of phases the rainfall grid. t_join stays the physical arrival, which
+    # need not be a multiple of the timestep; SCS-TUH keeps pulses that end
+    # strictly after that instant. No observed ordinate is passed at t_join:
+    # an off-grid join is not a rainfall-grid sample, and the datum would
+    # hide Q_rem. The splice below adds Q_arr(t_join) back.
     remainder = route_rainfall(
         hyetograph,
         loss,
         watershed,
         timestep_hours=timestep_hours,
         t_join=routed.t_join,
-        observed_inflow=((routed.t_join, q_join),),
+        as_of=as_of,
     )
-    remainder_times: list[int] = []
+    q_rem_join = 0.0
+    remainder_samples: list[tuple[int, float]] = []
     for point in remainder.points:
         if point.time is None:
             continue
         instant = _to_us(_parse_rfc3339(point.time, role="remainder inflow time"))
-        if instant <= t_join_us:
-            continue
-        increment = point.discharge_m3s - q_join
-        if increment < 0.0:
-            increment = 0.0
-        values[instant] = q_join + increment
-        remainder_times.append(instant)
-    if remainder_times:
-        # Q_rem is 0 until the first convolved ordinate, so the splice holds
-        # the join discharge instead of dropping to an empty-slot 0.
-        first_remainder = min(remainder_times)
-        for instant in _grid(t_join_us + step, first_remainder - step, step):
+        if instant == t_join_us:
+            q_rem_join = point.discharge_m3s
+        elif instant > t_join_us:
+            remainder_samples.append((instant, point.discharge_m3s))
+    positive_remainder = [instant for instant, discharge in remainder_samples if discharge > 0.0]
+    if positive_remainder:
+        first_remainder = min(positive_remainder)
+        last_remainder = max(positive_remainder)
+        for instant, discharge in remainder_samples:
+            if not first_remainder <= instant <= last_remainder:
+                continue
+            increment = discharge - q_rem_join
+            if increment < 0.0:
+                increment = 0.0
+            values[instant] = q_join + increment
+        for instant in _grid_between(as_of_us, step, t_join_us, first_remainder):
             values.setdefault(instant, q_join)
 
     if observed_inflow:
