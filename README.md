@@ -4,7 +4,7 @@ HydroAgent 是一个**纯 MCP 服务**项目：面向水库防洪调度，提供
 
 ## 状态
 
-**设计阶段（Design）** `src/hydro_agent/servers/` 尚未实现。`hydro_agent.core` 已提供 SCS-CN 产流、SCS 单位线汇流，以及马斯京根与变动滞时河道演进。
+**设计阶段（Design）** `src/hydro_agent/servers/` 尚未实现。`hydro_agent.core` 已提供 SCS-CN 产流、SCS 单位线汇流、马斯京根与变动滞时河道演进，以及静库容调洪。
 
 ## 服务边界
 
