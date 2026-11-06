@@ -1,5 +1,20 @@
-"""Shared hydrology domain logic: SCS-CN excess, SCS unit-hydrograph runoff, and routing."""
+"""Shared hydrology domain logic: SCS runoff, channel routing, and inflow splicing."""
 
+from hydro_agent.core.channel_routing import (
+    AreaScale,
+    BlendedInflow,
+    ChannelRoutingError,
+    ChannelRoutingErrorCode,
+    LaggedArrival,
+    MuskingumCoefficients,
+    MuskingumReach,
+    MuskingumResult,
+    VariableLag,
+    VariableLagResult,
+    blend_station_and_forecast,
+    route_muskingum,
+    route_variable_lag,
+)
 from hydro_agent.core.scs_cn import (
     AmcCondition,
     ExcessStep,
@@ -36,11 +51,19 @@ from hydro_agent.core.scs_uh import (
 
 __all__ = [
     "AmcCondition",
+    "AreaScale",
+    "BlendedInflow",
+    "ChannelRoutingError",
+    "ChannelRoutingErrorCode",
     "ExcessInput",
     "ExcessStep",
     "ImperviousTreatment",
     "InflowHydrograph",
     "InflowPoint",
+    "LaggedArrival",
+    "MuskingumCoefficients",
+    "MuskingumReach",
+    "MuskingumResult",
     "RainfallSeries",
     "RegionalQuantity",
     "RegionalTiming",
@@ -56,12 +79,17 @@ __all__ = [
     "TimedRainfall",
     "TimingMethod",
     "UnitHydrographOrdinate",
+    "VariableLag",
+    "VariableLagResult",
     "Watershed",
+    "blend_station_and_forecast",
     "compute_excess",
     "compute_excess_batch",
     "excess_after",
     "generalized_triangle_inflow",
     "route_excess",
+    "route_muskingum",
     "route_rainfall",
+    "route_variable_lag",
     "scs_unit_hydrograph",
 ]
