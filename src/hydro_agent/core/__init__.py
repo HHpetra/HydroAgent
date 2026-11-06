@@ -1,4 +1,4 @@
-"""Shared hydrology domain logic: SCS-CN excess, curves, and level-pool routing."""
+"""Shared hydrology domain logic: SCS-CN excess, SCS unit-hydrograph runoff, and routing."""
 
 from hydro_agent.core.scs_cn import (
     AmcCondition,
@@ -16,20 +16,52 @@ from hydro_agent.core.scs_cn import (
     compute_excess_batch,
     excess_after,
 )
+from hydro_agent.core.scs_uh import (
+    ExcessInput,
+    InflowHydrograph,
+    InflowPoint,
+    RegionalQuantity,
+    RegionalTiming,
+    ScsUhError,
+    ScsUhErrorCode,
+    ScsUnitHydrograph,
+    TimingMethod,
+    UnitHydrographOrdinate,
+    Watershed,
+    generalized_triangle_inflow,
+    route_excess,
+    route_rainfall,
+    scs_unit_hydrograph,
+)
 
 __all__ = [
     "AmcCondition",
+    "ExcessInput",
     "ExcessStep",
     "ImperviousTreatment",
+    "InflowHydrograph",
+    "InflowPoint",
     "RainfallSeries",
+    "RegionalQuantity",
+    "RegionalTiming",
     "RemainderExcess",
     "ScsCnCase",
     "ScsCnError",
     "ScsCnErrorCode",
     "ScsCnParameters",
     "ScsCnResult",
+    "ScsUhError",
+    "ScsUhErrorCode",
+    "ScsUnitHydrograph",
     "TimedRainfall",
+    "TimingMethod",
+    "UnitHydrographOrdinate",
+    "Watershed",
     "compute_excess",
     "compute_excess_batch",
     "excess_after",
+    "generalized_triangle_inflow",
+    "route_excess",
+    "route_rainfall",
+    "scs_unit_hydrograph",
 ]

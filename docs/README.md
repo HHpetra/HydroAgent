@@ -11,7 +11,7 @@ HydroAgent 是纯 Python MCP 服务项目：不包含桌面壳、launcher 或 ds
 | :--- | :--- | :--- |
 | MCP 服务 | `src/hydro_agent/servers/reservoir_info.py` | 只读水库资料与过程序列 |
 | MCP 服务 | `src/hydro_agent/servers/floodroute.py` | 静库容调洪与调度方案计算 |
-| 领域核心 | `src/hydro_agent/core/` | SCS-CN 产流、时序、曲线、水力与调洪算法（共享） |
+| 领域核心 | `src/hydro_agent/core/` | SCS-CN 产流、SCS 单位线汇流、时序、曲线、水力与调洪算法（共享） |
 | 数据 | `tests/fixtures/`、`HYDRO_AGENT_DATA_DIR` | 可复现样例与运行资料 |
 | 宿主 | 任意 MCP 客户端 | stdio 启动、工具调用与结果展示 |
 
@@ -28,6 +28,10 @@ HydroAgent 是纯 Python MCP 服务项目：不包含桌面壳、launcher 或 ds
 ## SCS-CN 产流
 
 流域净雨在 `hydro_agent.core` 中按一场雨的累积降雨计算：先得到累积净雨，再差分出逐时段净雨。初损在整场雨里只消耗一次。按场景时刻截取余雨时，先算完整场雨，再取该时刻之后的增量。直接相连的不透水面积默认不扣损。
+
+## SCS 单位线汇流
+
+净雨经 SCS 三角形单位线离散卷积得到直接径流，叠加基流后成为入库过程。离散纵标按 1 mm 净雨对应 `1000 F` m³ 重标定，`F` 为流域面积（km²）。接合时刻只卷积其后的余雨，并在该时刻与已有入库连续。给出场景时刻时，输出至少铺满其前后各 12 h；没有过程值的时刻为 0，不把基流抄进空档。资料退化时由洪峰和达峰小时数生成概化三角形入库；未给退水历时则涨退比为 1:2。`hours_to_peak` 从场景时刻起算，优先于手册涨水历时。
 
 ## 边界
 
